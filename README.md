@@ -13,6 +13,22 @@ guilty side — or honestly reports `unclear` when it can't tell.
 > LLM on all three examples (see [CONTEXT.md](CONTEXT.md)). CI runs the whole
 > suite offline, so it needs no API keys.
 
+## Demo
+
+One `./run_testpilot.sh examples/` pass:
+
+**1. Generate → run → diagnose → patch → re-run, for each file:**
+
+![TestPilot batch run: ambiguous.py is diagnosed as a test bug and patched to green, then correct_code_wrong_test.py also finishes green](docs/demo-batch-run.png)
+
+**2. The diagnosis and the suggested fix, as a unified diff:**
+
+![off_by_one.py: the diagnosis pins the off-by-one loop, and the suggested fix is printed as a unified diff while the original file stays untouched](docs/demo-diagnosis.png)
+
+**3. The batch summary — and it runs on any file, not just the bundled examples:**
+
+![Batch summary showing 3 of 3 files green, followed by a run on an arbitrary file outside the project](docs/demo-summary.png)
+
 ## Quick start
 
 ```bash

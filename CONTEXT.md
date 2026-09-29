@@ -136,6 +136,7 @@ demonstrate it.)
 ├── run_testpilot.py     batch runner: file-or-folder, stdlib only
 ├── .env / .env.example  provider keys + model overrides
 ├── .github/workflows/ci.yml  offline CI: ruff + the full suite, no API keys
+├── docs/               README screenshots (committed so no external image host)
 ├── examples/            off_by_one.py, correct_code_wrong_test.py, ambiguous.py
 ├── src/testpilot/       the package (cli, config, llm, parsing, prompts,
 │                        report, sandbox/, agent/)

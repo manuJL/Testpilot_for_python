@@ -11,3 +11,5 @@ build/
 *.kate-swp
 *.fixed.py
 .report/
+# scratch downloads; the copies that ship live in docs/
+output images/

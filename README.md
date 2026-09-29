@@ -10,7 +10,7 @@ failure means the *test* is wrong or the *code* is wrong, and then patches the
 guilty side — or honestly reports `unclear` when it can't tell.
 
 > Status: working end-to-end — 128 tests, lint-clean, verified against a live
-> LLM on all three examples (see [CONTEXT.md](CONTEXT.md)). CI runs the whole
+> LLM on all examples in the exasmples  folder and  (see [CONTEXT.md](CONTEXT.md)). CI runs the whole
 > suite offline, so it needs no API keys.
 
 ## Demo
@@ -33,7 +33,7 @@ One `./run_testpilot.sh examples/` pass:
 
 ```bash
 uv sync
-cp .env.example .env   # add your Groq key
+cp .env.example .env     # add your Groq key or or create .env  file in the project paste your AI api directly and all the all api keys mentioned in  the project  are free and has great  limits to test the project 
 uv run testpilot run examples/off_by_one.py
 ```
 
@@ -89,6 +89,9 @@ src/testpilot/
 ├── parsing.py       # extract code blocks / JSON
 └── report.py        # final report + diff
 ```
+## why  this was made  and idea behind it 
+
+honestly i use llm a lot  very lot and i love vibe  coding  and  you know all these  llms  sometimes consumes your tokens   by generating  the whole rewrite   code instead of telling what to fix and where and don't even the run the codes   which can leads  lots of hallicutions and promblems that everyones hates that why i made Testpilot  a aagent that runs the code in the sandbox enviroment inside your terminal and  tells  weather your python code is great or not  and how to improve the  code only using llm api   and with strict system-prompt and also  i plan to  work further on this and  publish as standalone project or make it plugin for claude code/open code  
 
 ## License
 

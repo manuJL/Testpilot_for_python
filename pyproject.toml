@@ -1,0 +1,39 @@
+[project]
+name = "testpilot"
+version = "0.1.0"
+description = "Point it at a buggy Python file. It writes pytest tests, runs them safely, diagnoses whether the bug is in the code or the tests, and fixes the right one."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "TestPilot contributors" }]
+requires-python = ">=3.11"
+keywords = ["testing", "llm", "agent", "pytest", "debugging"]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "httpx>=0.27",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "langgraph>=1.2.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+testpilot = "testpilot.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/testpilot"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+# The suite lives in testing/ (a temporary folder, see CONTEXT.md) — not "tests".
+# Getting this wrong makes bare `pytest` warn "No files were found in testpaths"
+# and silently fall back to a recursive search from the cwd.
+testpaths = ["testing"]

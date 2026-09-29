@@ -1,5 +1,7 @@
 # TestPilot
 
+[![CI](https://github.com/manuJL/Pyfixer/actions/workflows/ci.yml/badge.svg)](https://github.com/manuJL/Pyfixer/actions/workflows/ci.yml)
+
 **Point it at a buggy Python file. It writes the tests, runs them safely, and fixes the right thing.**
 
 TestPilot is a small agent loop for students and junior developers: it generates
@@ -7,8 +9,9 @@ pytest tests for a Python file, runs them in a sandbox, diagnoses whether a
 failure means the *test* is wrong or the *code* is wrong, and then patches the
 guilty side — or honestly reports `unclear` when it can't tell.
 
-> Status: working end-to-end — 60+ tests, lint-clean, verified against a live
-> LLM on all three examples (see [CONTEXT.md](CONTEXT.md)).
+> Status: working end-to-end — 128 tests, lint-clean, verified against a live
+> LLM on all three examples (see [CONTEXT.md](CONTEXT.md)). CI runs the whole
+> suite offline, so it needs no API keys.
 
 ## Quick start
 

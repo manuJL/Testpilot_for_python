@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# The suite is fully offline (ScriptedLLM in testing/), so CI needs no API
+# keys — deliberately. Live LLM calls are rate-limited and would leak secrets
+# into runner logs, so they never run here.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned exactly: setup-uv publishes floating tags only up to v7, so
+      # `@v10` (or `@v5` from an older write-up) would not resolve.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+
+      # `uv sync` pulls the `dev` dependency group by default (pytest + ruff)
+      # and honours uv.lock, so CI installs exactly what the lockfile says.
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check src/ testing/ run_testpilot.py
+
+      - name: Test
+        run: uv run pytest -q --tb=short

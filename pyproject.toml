@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.16,<0.17"]
 
 [project.scripts]
 testpilot = "testpilot.cli:app"
@@ -30,7 +30,9 @@ build-backend = "hatchling.build"
 packages = ["src/testpilot"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+# ruff is declared here on purpose: `uv run ruff` fails with "Failed to spawn"
+# if it is only on the developer's PATH, which also breaks it in CI.
+dev = ["pytest>=8.0", "ruff>=0.16,<0.17"]
 
 [tool.pytest.ini_options]
 # The suite lives in testing/ (a temporary folder, see CONTEXT.md) — not "tests".

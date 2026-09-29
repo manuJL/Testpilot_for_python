@@ -110,12 +110,14 @@ demonstrate it.)
   should still be rotated** before this repo is shared or submitted, since they
   were in plaintext earlier in this session.
 - **`testing/` is temporary** by design; the shipped package does not depend on it.
-- **Free-tier rate limits are real.** Groq's 8000 TPM limit will surface as a
-  transient `429`; the run degrades to an honest `gave_up` with the reason in
-  the history rather than crashing. Two parallel runs against the same key will
-  trip it.
-- **No retry/backoff on 429 yet** — the run stops rather than waiting and
-  resuming.
+- **Free-tier rate limits are real.** Groq's 8000 TPM limit surfaces as a
+  transient `429`. `llm.py` retries up to 4 attempts, honouring the provider's
+  `Retry-After` header — or the `try again in Ns` hint in the JSON body when
+  only that is present — capped at 45s, with exponential fallback capped at 8s.
+  408/429/5xx retry; **401/404 fail fast** so a bad model ID never sleeps
+  through the retries. *Sustained* throttling (several files back-to-back on
+  one key) still degrades to an honest `gave_up` with the reason in the history
+  rather than crashing — which is the intended behaviour, not a silent pass.
 - **Gemini/OpenRouter code paths are exercised only through the shared
   `HTTPChatLLM`**; only Groq was validated end-to-end this session.
 
@@ -128,11 +130,14 @@ demonstrate it.)
 ├── README.md            project front door
 ├── TestPilot_Hackathon_Plan.md   the original brief
 ├── pyproject.toml       uv-managed; entry point `testpilot = testpilot.cli:app`
+│                        dev group = pytest + ruff (ruff must be declared, or
+│                        `uv run ruff` fails with "Failed to spawn")
 ├── run_testpilot.sh     batch launcher (asks for a path, wraps the .py)
 ├── run_testpilot.py     batch runner: file-or-folder, stdlib only
 ├── .env / .env.example  provider keys + model overrides
+├── .github/workflows/ci.yml  offline CI: ruff + the full suite, no API keys
 ├── examples/            off_by_one.py, correct_code_wrong_test.py, ambiguous.py
 ├── src/testpilot/       the package (cli, config, llm, parsing, prompts,
 │                        report, sandbox/, agent/)
-└── testing/             60+ tests + ScriptedLLM  (temporary, deletable)
+└── testing/             128 tests + ScriptedLLM  (temporary, deletable)
 ```

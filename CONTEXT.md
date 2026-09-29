@@ -137,7 +137,10 @@ demonstrate it.)
 ├── .env / .env.example  provider keys + model overrides
 ├── .github/workflows/ci.yml  offline CI: ruff + the full suite, no API keys
 ├── docs/               README screenshots (committed so no external image host)
-├── examples/            off_by_one.py, correct_code_wrong_test.py, ambiguous.py
+├── examples/            demo targets: off_by_one.py, correct_code_wrong_test.py,
+│                        ambiguous.py, python1/3/4/5/6.py (named pythonN.py on
+│                        purpose — a `test_*.py` name makes the launcher skip
+│                        the file as a test, not code under test)
 ├── src/testpilot/       the package (cli, config, llm, parsing, prompts,
 │                        report, sandbox/, agent/)
 └── testing/             128 tests + ScriptedLLM  (temporary, deletable)

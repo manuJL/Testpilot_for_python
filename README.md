@@ -89,9 +89,11 @@ src/testpilot/
 ├── parsing.py       # extract code blocks / JSON
 └── report.py        # final report + diff
 ```
-## why  this was made  and idea behind it 
+##  Notes :
 
-honestly i use llm a lot  very lot and i love vibe  coding  and  you know all these  llms  sometimes consumes your tokens   by generating  the whole rewrite   code instead of telling what to fix and where and don't even the run the codes   which can leads  lots of hallicutions and promblems that everyones hates that why i made Testpilot  a aagent that runs the code in the sandbox enviroment inside your terminal and  tells  weather your python code is great or not  and how to improve the  code only using llm api   and with strict system-prompt and also  i plan to  work further on this and  publish as standalone project or make it plugin for claude code/open code  
+#why  this was made  and idea behind it 
+
+honestly i use llm a lot  very lot and i love vibe  coding  and  you know all these  llms  sometimes consumes your tokens   by generating  the whole rewrite   code instead of telling what to fix and where and don't even the run the codes   which can leads  lots of hallicutions and promblems that everyones hates and you also has to use open their  website upload your code their to get results or  use opencode that has its own limits  somestimes  that why i made Testpilot  a aagent that runs the code in the sandbox enviroment inside your terminal and  tells  weather your python code is great or not  and how to improve the  code only using llm api   and with strict system-prompt and also  i plan to  work further on this and  publish as standalone project or make it plugin for claude code/open code  it depends on the future and i made this  using full vibe coding in less than 24 hours for hackathon
 
 ## License
 

@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 # The suite is fully offline (ScriptedLLM in testing/), so CI needs no API
-# keys — deliberately. Live LLM calls are rate-limited and would leak secrets a.k.a we are not doing this baby
+# keys — deliberately. Live LLM calls are rate-limited and would leak secrets
 # into runner logs, so they never run here.
 permissions:
   contents: read

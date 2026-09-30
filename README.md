@@ -37,13 +37,48 @@ One `./run_testpilot.sh examples/` pass:
 
 ![Batch summary showing 3 of 3 files green, followed by a run on an arbitrary file outside the project](docs/demo-summary.png)
 
-## Quick start
+## Install and run
+
+Every line of this was written and tested on **Linux**, so that's the path I
+know works. The Windows steps are below too, but they are **untested** —
+running it there may or may not cause errors (see
+[Known limitations](#known-limitations) for what's likely to bite).
+
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and
+Python 3.11 or newer — `uv sync` fetches a matching interpreter on its own if
+you don't have one.
+
+### Linux — tested
 
 ```bash
+git clone https://github.com/manuJL/Pyfixer.git
+cd Pyfixer
+
 uv sync
-cp .env.example .env     # then paste one free API key into .env
+cp .env.example .env          # then paste one free API key into .env
+
 uv run testpilot run examples/off_by_one.py
 ```
+
+### Windows (PowerShell) — untested, may cause errors
+
+```powershell
+git clone https://github.com/manuJL/Pyfixer.git
+cd Pyfixer
+
+uv sync
+Copy-Item .env.example .env   # then paste one free API key into .env
+notepad .env
+
+uv run testpilot run examples\off_by_one.py
+```
+
+If PowerShell doesn't know `uv`, install it first with
+`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+or `winget install astral-sh.uv`. Apart from that, the install is identical.
+What may differ is *running*: the sandbox kills timed-out processes with
+POSIX-only calls (`start_new_session`, `os.killpg`), which is exactly the part
+that has never been exercised on Windows.
 
 You only need **one** key. `.env.example` ships blank on purpose — your keys go
 in `.env`, which is gitignored, so you can't accidentally commit them.
@@ -58,7 +93,7 @@ in `.env`, which is gitignored, so you can't accidentally commit them.
 
 There's no offline mode. No key means it stops and prints exactly what to do.
 
-### The loop
+## The loop
 
 ```
 generate → run → (green? report)
@@ -70,7 +105,7 @@ Each of those five states is reported for what it is. A rate limit shows up as
 an error, *not* as "budget exhausted" — and an answer the model never gave is
 never dressed up as an honest `unclear`.
 
-### Things it refuses to do
+## Things it refuses to do
 
 - **Never touch your file.** Your original stays exactly as it is. Fixes are
   printed as a unified diff; `--write` saves them to `<name>.fixed.py`.
@@ -128,6 +163,15 @@ Point it at a folder, or at individual files — it asks if you give it nothing:
 
 `run_testpilot.py` is the real implementation (stdlib only); the `.sh` is a
 convenience wrapper that finds `python3`/`uv`.
+
+`run_testpilot.sh` is bash, so on Windows call the Python directly (and use
+`\` for folders):
+
+```powershell
+uv run python run_testpilot.py                 # prompts: "Where is the Python code?"
+uv run python run_testpilot.py examples\       # every eligible .py in the folder
+uv run python run_testpilot.py a.py b.py       # individual files
+```
 
 By default each file streams TestPilot's full report straight to your terminal —
 node progress (`→ generate`, `→ run 7 passed`), the status panel, the loop-history

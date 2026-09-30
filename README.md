@@ -194,21 +194,19 @@ docs/                # demo screenshots
 
 ## Why I built this
 
-Honestly? I use LLMs *a lot* — I love vibe coding. But you know how it goes:
+Honestly? I use LLMs *a lot* by that means everyday  every hour every second — I love vibe coding. But you know how it goes:
 the model burns your tokens rewriting the whole file instead of just telling you
-what's wrong and where, it never actually runs the code, and you end up with
-hallucinations and bugs that everybody hates. Then you're pasting your code into
-some random website to get an answer, or fighting whatever tool and its limits.
-
-So I made TestPilot: an agent that runs your code in a sandbox *inside your
+what's wrong and where even you tell in prompt  its still goes to generate  the code anyway even where there is only 1 line error  , it never actually runs the code except  some chatbot even those has limits of their own , and you end up with
+hallucinations and bugs that everybody hates. Then you're bashing your head  against the wall trying  to figure out to fix it  and start pulling  your hairs  and start remembering  all those bad memories  during that perioid is that only me ? or its happends to everyones i wonder that 
+So the main ponit is  I made TestPilot: an agent that runs your code in a sandbox *inside your
 terminal* and tells you whether your Python is actually any good and how to
 improve it — using nothing but an LLM API and a strict system prompt.
 
 I'm still working on it. Long term I'd like to publish it as a standalone
 project, or maybe as a plugin for Claude Code / OpenCode — depends on where it
-goes.
+goes   and  add support for the other languages as well such as rust  also it was best i could  done in the 24 hours and might  .
 
-I built this fully vibe-coded, in under 24 hours, for a hackathon.
+I built this fully vibe-coded, in under 24 hours, for a hackathon. -- manuJL 
 
 ## License
 

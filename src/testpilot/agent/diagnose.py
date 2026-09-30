@@ -15,7 +15,14 @@ VALID_VERDICTS = {"code_bug", "test_bug", "unclear"}
 
 
 def diagnose(llm: LLM, source: str, test_code: str, run: RunResult) -> dict[str, Any]:
-    """Return a normalized verdict dict: {verdict, reasoning, instructions}."""
+    """Return a normalized verdict dict: {verdict, reasoning, instructions}.
+
+    A reply we cannot parse is a *model failure*, not an ambiguity in the
+    user's code — so it is retried once and then flagged with an `error` key
+    (status `error`, exit code 2). Reporting it as a genuine `unclear` verdict
+    would tell the user "honest stop: I can't tell who's wrong" when the truth
+    is "the model never answered".
+    """
     # raw_output is always populated by the sandbox for a completed run; the
     # explicit fallback is for a RunResult built by a test stub.
     output = run.raw_output or "(no output)"
@@ -25,15 +32,43 @@ def diagnose(llm: LLM, source: str, test_code: str, run: RunResult) -> dict[str,
     try:
         data = extract_json(raw)
     except ValueError:
-        return {
-            "verdict": "unclear",
-            "reasoning": f"diagnose returned unparseable output: {raw[:200]}",
-            "instructions": "",
-        }
+        # One corrective retry: a malformed reply is usually a formatting slip
+        # (prose around the JSON, an unquoted key), and the feedback below is
+        # far cheaper than writing the whole run off as inconclusive.
+        retry = messages + [
+            {"role": "assistant", "content": raw},
+            {
+                "role": "user",
+                "content": (
+                    "That reply was not valid JSON, so it cannot be used. "
+                    "Reply with EXACTLY ONE object and no other text, shaped like: "
+                    '{"verdict": "code_bug", "reasoning": "...", "instructions": "..."}. '
+                    'Use "unclear" for the verdict if you genuinely cannot tell '
+                    'who is wrong.'
+                ),
+            },
+        ]
+        try:
+            data = extract_json(llm.chat("diagnose", retry))
+        except ValueError:
+            return {
+                "verdict": "unclear",  # keeps the router pointed at REPORT
+                "error": "the diagnosis step never returned parseable JSON "
+                         "(the model did not answer)",
+                "reasoning": f"diagnose returned unparseable output twice: {raw[:200]}",
+                "instructions": "",
+            }
 
     verdict = str(data.get("verdict", "unclear")).strip().lower()
     if verdict not in VALID_VERDICTS:
-        verdict = "unclear"
+        # Same class of failure: the model invented a fourth verdict, so we
+        # cannot claim it judged the code ambiguous.
+        return {
+            "verdict": "unclear",  # keeps the router pointed at REPORT
+            "error": f"the diagnosis step returned an unknown verdict: {verdict!r}",
+            "reasoning": str(data.get("reasoning", "")).strip(),
+            "instructions": "",
+        }
 
     return {
         "verdict": verdict,

@@ -14,6 +14,12 @@ dependencies = [
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "langgraph>=1.2.12",
+    # TestPilot's job is to run pytest against generated tests, so pytest is a
+    # runtime requirement, not a dev tool. It used to be dev-only, which is why
+    # the sandbox carried a `unittest discover` fallback — and unittest cannot
+    # collect plain pytest functions, so that fallback always reported
+    # "no tests collected" for perfectly good suites.
+    "pytest>=8.0",
 ]
 
 [project.optional-dependencies]

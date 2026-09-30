@@ -19,13 +19,16 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 
 from ..config import Config
+from ..integrity import analyse
 from ..llm import LLM, LLMError, make_llm
+from ..prompts import MODULE_NAME
 from ..sandbox.base import Sandbox
 from ..sandbox.local import LocalSubprocessSandbox
 from .diagnose import node_diagnose
 from .generate import node_generate
 from .patch import node_patch
 from .state import (
+    STATUS_ERROR,
     STATUS_GAVE_UP,
     STATUS_GREEN,
     STATUS_UNCLEAR,
@@ -39,6 +42,9 @@ RUN = "run"
 DIAGNOSE = "diagnose"
 PATCH = "patch"
 REPORT = "report"
+
+# Consecutive patches that changed nothing before the run gives up.
+_STALLED_AFTER = 2
 
 
 def node_run(sandbox: Sandbox, config: Config) -> Callable[[AgentState], dict]:
@@ -67,12 +73,36 @@ def node_report() -> Callable[[AgentState], dict]:
         run = state.get("last_run")
         diagnosis = state.get("diagnosis") or {}
 
-        if run is not None and run.all_green:
-            status = STATUS_GREEN
-            detail = f"all green: {run.summary}"
+        # Error cases first: they are NOT budget exhaustion, and they must not be
+        # reported as a genuine `unclear` verdict either.
+        if not state.get("test_code"):
+            status = STATUS_ERROR
+            detail = "the test file is empty — nothing could be run"
+        elif diagnosis.get("error"):
+            status = STATUS_ERROR
+            detail = str(diagnosis["error"])
+        elif run is not None and run.all_green:
+            if not analyse(state.get("test_code", "")).imports_target:
+                # Green is only meaningful if the suite exercises the real
+                # module: a test file that never imports it can pass while the
+                # bug survives, and calling that "TESTS GREEN" would be the
+                # exact dishonesty this tool exists to avoid.
+                status = STATUS_ERROR
+                detail = (
+                    f"tests passed but never import `{MODULE_NAME}` — "
+                    "they do not exercise your code"
+                )
+            else:
+                status = STATUS_GREEN
+                detail = f"all green: {run.summary}"
         elif diagnosis.get("verdict") == "unclear":
             status = STATUS_UNCLEAR
             detail = f"stopped as unclear: {diagnosis.get('reasoning', '')}"
+        elif int(state.get("consecutive_no_progress", 0)) >= _STALLED_AFTER:
+            status = STATUS_GAVE_UP
+            detail = (
+                f"stopped after {_STALLED_AFTER} consecutive patches changed nothing"
+            )
         elif state.get("iteration", 0) >= state.get("max_iterations", 0):
             status = STATUS_GAVE_UP
             detail = f"budget exhausted after {state.get('iteration')} iterations"
@@ -88,12 +118,32 @@ def node_report() -> Callable[[AgentState], dict]:
     return report
 
 
+def _route_after_generate(state: AgentState) -> str:
+    """No usable test code -> report immediately (#10).
+
+    Running an empty test file collects nothing, reports 0 passed, and would
+    then send the *diagnose* step off to "fix" a test suite that does not
+    exist — burning an iteration and often patching the source for the wrong
+    reason. Nothing to run means nothing to diagnose.
+    """
+    if not (state.get("test_code") or "").strip():
+        return REPORT
+    return RUN
+
+
 def _route_after_run(state: AgentState) -> str:
-    """Green -> report; otherwise diagnose, unless the budget is spent."""
+    """Green -> report; otherwise diagnose, unless the budget is spent.
+
+    Two patches in a row that changed nothing also end the run: the model has
+    demonstrated it will keep producing the same answer, so spending the rest
+    of the budget on it is not diligence, it is waste.
+    """
     run = state.get("last_run")
     if run is None:
         return DIAGNOSE
     if run.all_green:
+        return REPORT
+    if int(state.get("consecutive_no_progress", 0)) >= _STALLED_AFTER:
         return REPORT
     if state.get("iteration", 0) >= state.get("max_iterations", 0):
         return REPORT
@@ -120,7 +170,18 @@ def build_graph(llm: LLM, sandbox: Sandbox, config: Config):
     graph.add_node(REPORT, node_report())
 
     graph.add_edge(START, GENERATE)
-    graph.add_edge(GENERATE, RUN)
+    # Both GENERATE and PATCH can hand back an empty test file; run the same
+    # guard so we never execute (or diagnose against) a non-existent suite.
+    graph.add_conditional_edges(
+        GENERATE,
+        _route_after_generate,
+        {RUN: RUN, REPORT: REPORT},
+    )
+    graph.add_conditional_edges(
+        PATCH,
+        _route_after_generate,
+        {RUN: RUN, REPORT: REPORT},
+    )
     graph.add_conditional_edges(
         RUN,
         _route_after_run,
@@ -177,15 +238,19 @@ def run_file(
             else:
                 final[key] = value
 
-    def _stop(reason: str, detail: str) -> None:
+    def _stop(reason: str, detail: str, status: str = STATUS_GAVE_UP) -> None:
         """End the run honestly without discarding the work already done.
 
         `history` and `notes` are operator.add reducers, so they must be
         APPENDED to. Assigning a fresh one-element list here would erase every
         node the graph had already executed — defeating the whole purpose of
         catching the exception instead of letting it propagate.
+
+        `status` distinguishes a genuinely exhausted budget (gave_up) from an
+        interrupted run (error): both exit non-zero, but only one of them is
+        allowed to say "budget exhausted".
         """
-        final["status"] = STATUS_GAVE_UP
+        final["status"] = status
         final["notes"] = list(final.get("notes") or []) + [reason]
         final["history"] = list(final.get("history") or []) + [
             {"step": "report", "iteration": final.get("iteration", 0), "detail": detail}
@@ -207,10 +272,13 @@ def run_file(
         _stop(
             f"gave up: hit graph step limit ({recursion_limit})",
             f"gave up: graph step limit ({recursion_limit}) reached",
+            status=STATUS_GAVE_UP,
         )
     except LLMError as exc:
         # A transient 429/5xx must not discard the run's work: keep the state
         # built so far and stop with an honest status instead of a traceback.
-        _stop(f"llm error: {exc}", f"stopped: LLM error — {exc}")
+        # This is NOT budget exhaustion — labelling it so would tell the user
+        # they ran out of iterations when they actually hit a rate limit.
+        _stop(f"llm error: {exc}", f"stopped: LLM error — {exc}", status=STATUS_ERROR)
 
     return final

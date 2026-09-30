@@ -13,9 +13,9 @@ from rich.table import Table
 
 from . import __version__
 from .agent.loop import run_file
-from .agent.state import AgentState
+from .agent.state import STATUS_ERROR, STATUS_GREEN, AgentState
 from .config import Config, MissingAPIKeyError
-from .report import render
+from .report import render, status_label
 
 app = typer.Typer(
     name="testpilot",
@@ -24,6 +24,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+# Errors go to stderr so `--json` still emits exactly one parseable JSON
+# document on stdout (a red message on stdout would corrupt it).
+err = Console(stderr=True)
 
 
 def _print_missing_key(exc: MissingAPIKeyError) -> None:
@@ -56,8 +59,9 @@ def main(
 def run(
     path: Path = typer.Argument(..., exists=True, dir_okay=False,  # noqa: B008 — typer's declarative API
                                 readable=True, help="Python file to test."),
-    max_iterations: int = typer.Option(4, "--max-iterations", "-n", min=1, max=10,
-                                       help="Max diagnose→patch cycles."),
+    max_iterations: int | None = typer.Option(None, "--max-iterations", "-n", min=1, max=10,
+                                               help="Max diagnose→patch cycles "
+                                                    "(default: TESTPILOT_MAX_ITER, else 4)."),
     provider: str = typer.Option("", "--provider", "-p",
                                  help="groq | openrouter | gemini (default: auto)."),
     model: str = typer.Option("", "--model", "-m",
@@ -68,21 +72,28 @@ def run(
     no_diff: bool = typer.Option(False, "--no-diff", help="Skip the unified diff in output."),
 ) -> None:
     """Run the full generate → run → diagnose → patch loop on PATH."""
-    # Config's field factories parse TESTPILOT_TIMEOUT / TESTPILOT_TEMPERATURE,
-    # so a malformed .env value raises here — must be inside the guard to keep
-    # the 0/1/2 exit-code contract (2 = config error) instead of a traceback.
+    # Config's field factories parse TESTPILOT_MAX_ITER / TESTPILOT_TIMEOUT /
+    # TESTPILOT_TEMPERATURE, so a malformed .env value raises here — must be
+    # inside the guard to keep the 0/1/2 exit-code contract (2 = config error)
+    # instead of a traceback. `-n` defaults to None so TESTPILOT_MAX_ITER is
+    # actually reachable: a hard-coded option default would always win and
+    # silently ignore the env var.
     try:
-        config = Config(max_iterations=max_iterations, provider=provider)
+        config = Config(
+            provider=provider,
+            **({"max_iterations": max_iterations} if max_iterations is not None else {}),
+        )
         if model.strip():
-            # Applies to both steps; empty means "use env vars / provider default".
+            # Applies to every step; empty means "use env vars / provider default".
             config.generate_model = model.strip()
             config.diagnose_model = model.strip()
+            config.patch_model = model.strip()
         provider_name, _ = config.resolve_provider()
     except MissingAPIKeyError as exc:
         _print_missing_key(exc)
         raise typer.Exit(code=2)
     except (ValueError, TypeError) as exc:
-        console.print(f"[red]error:[/] invalid value in .env: {escape(str(exc))}")
+        err.print(f"[red]error:[/] invalid value in .env: {escape(str(exc))}")
         raise typer.Exit(code=2)
 
     started = time.monotonic()
@@ -103,25 +114,40 @@ def run(
         _print_missing_key(exc)
         raise typer.Exit(code=2)
     except (FileNotFoundError, ValueError) as exc:
-        console.print(f"[red]error:[/] {escape(str(exc))}")
+        err.print(f"[red]error:[/] {escape(str(exc))}")
         raise typer.Exit(code=2)
     except Exception as exc:  # noqa: BLE001 — top-level guard: show a clean error, never a traceback
-        console.print(f"[red]run failed:[/] {escape(str(exc))}")
+        err.print(f"[red]run failed:[/] {escape(str(exc))}")
         raise typer.Exit(code=2)
 
     state["duration"] = round(time.monotonic() - started, 2)
 
     # Persist before reporting, so --write works in both --json and rich modes.
+    # Only a GREEN run has actually proven anything: a `.fixed.py` written from
+    # a run that ended gave_up/unclear/error is an unverified edit presented
+    # with the authority of a file on disk.
+    status = state.get("status")
     fixed_path = None
-    if write and state.get("code_patched"):
+    if write and state.get("code_patched") and status == STATUS_GREEN:
         try:
             from .report import write_fixed_file
 
             fixed_path = write_fixed_file(state)
         except OSError as exc:
             # A failed write must not masquerade as exit code 1 (unclear/gave_up).
-            console.print(f"[red]error:[/] could not write fixed file: {escape(str(exc))}")
+            err.print(f"[red]error:[/] could not write fixed file: {escape(str(exc))}")
             raise typer.Exit(code=2)
+    elif write and state.get("code_patched") and not as_json:
+        # Not an error, so it stays on stdout with the rest of the report —
+        # but it is skipped entirely in --json mode, which must emit one
+        # clean document (written_file: null already carries this fact).
+        console.print(
+            "[bold red]⚠ --write refused:[/] the run ended "
+            f"[bold]{escape(status_label(status))}[/] and the patch was never "
+            "verified by a green suite, so no .fixed.py was written. The "
+            "suggested fix is in the report below — apply it yourself if you "
+            "want it."
+        )
     elif write and not as_json:
         # --write was asked for but there is no source change to persist.
         # Say so explicitly: silently writing nothing looks like a broken flag.
@@ -156,13 +182,21 @@ def run(
             print(json.dumps(payload, indent=2))
         else:
             if fixed_path:
-                console.print(f"\n[green]Wrote[/] [bold]{fixed_path}[/]")
+                console.print(f"\n[green]Wrote[/] [bold]{escape(str(fixed_path))}[/]")
             render(state, console, show_diff=not no_diff)
     except Exception as exc:  # noqa: BLE001 — reporting must not change the run's exit code
-        console.print(f"[red]error while reporting:[/] {escape(str(exc))}")
+        err.print(f"[red]error while reporting:[/] {escape(str(exc))}")
         raise typer.Exit(code=2)
 
-    raise typer.Exit(code=0 if state.get("status") == "green" else 1)
+    # 0 = green, 1 = an honest non-green verdict (unclear / budget exhausted),
+    # 2 = the run was interrupted (rate limit, unparseable diagnosis, no tests)
+    # or could not be configured. Keeping 2 for interrupted runs means callers
+    # can tell "you ran out of budget" from "something went wrong".
+    if status == STATUS_GREEN:
+        raise typer.Exit(code=0)
+    if status == STATUS_ERROR:
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=1)
 
 
 @app.command("graph")
@@ -175,21 +209,41 @@ def graph_cmd() -> None:
     table.add_column("when", style="dim")
     rows = [
         ("START", "generate", ""),
-        ("generate", "run", ""),
+        ("generate", "run", "test code was produced"),
+        ("generate", "report", "no test code (#10 guard)"),
         ("run", "report", "all tests green or budget spent"),
         ("run", "diagnose", "failures remain"),
-        ("diagnose", "report", "verdict: unclear"),
+        ("diagnose", "report", "verdict: unclear / unparsable"),
         ("diagnose", "patch", "verdict: code_bug | test_bug"),
         ("patch", "run", "prove the fix"),
+        ("patch", "report", "no test code (#10 guard)"),
         ("report", "END", ""),
     ]
     for a, b, when in rows:
         table.add_row(a, b, when)
     console.print(table)
     console.print(f"[dim]nodes: {', '.join(nodes)}[/]")
-    console.print("[dim]Mermaid:[/] graph TD; START-->generate-->run;"
-                  "run-->|green| report; run-->|fail| diagnose;"
-                  "diagnose-->|unclear| report; diagnose-->|fix| patch; patch-->run; report-->END")
+    # The Mermaid block is derived from the compiled graph, not hand-written,
+    # so it can never drift from the real topology. Node factories only capture
+    # their dependencies, so building the graph needs neither an API key nor a
+    # sandbox; a failure here degrades to the hand-written fallback.
+    console.print("[dim]Mermaid:[/]")
+    try:
+        from .agent.loop import build_graph
+
+        compiled = build_graph(None, None, None)  # type: ignore[arg-type]
+        console.print(compiled.get_graph().draw_mermaid(), highlight=False)
+    except Exception as exc:  # noqa: BLE001 — cosmetics must never fail the command
+        console.print(
+            f"[dim](graph introspection unavailable: {escape(str(exc))})[/]"
+        )
+        console.print(
+            "graph TD; START-->generate; generate-->|tests| run; "
+            "generate-->|none| report; run-->|green| report; "
+            "run-->|fail| diagnose; diagnose-->|unclear| report; "
+            "diagnose-->|fix| patch; patch-->|tests| run; "
+            "patch-->|none| report; report-->END"
+        )
 
 
 if __name__ == "__main__":

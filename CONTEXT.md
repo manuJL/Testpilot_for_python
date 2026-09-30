@@ -58,6 +58,67 @@ tail read keeps parent RSS flat (measured: **0 MB delta** on a test that emits
 no-op patch cleared an earlier real fix — and `--write` then silently saved
 nothing.
 
+**A suite has to prove something.** `integrity.py` rejects a generated file
+that dropped the `testpilot_target` import, deleted the tests that were
+failing, or stripped assertions — and the history prints `tests: N, asserts: M`
+so a shrinking suite is visible. Green additionally requires at least one
+*passing* test against the real module, so `1 skipped` can't be sold as success.
+The complementary rule lives at the other end: `--write` only ever writes a
+`.fixed.py` from a run that actually ended green.
+
+**An unparseable answer is not a verdict.** A diagnosis the model never gave
+must not be defaulted into a genuine `unclear` — `diagnose` retries once with
+nudging, and if it still isn't valid JSON the run stops as `error` (exit 2).
+
+**The most tempting fake green is deleting a requirement, not deleting a test.**
+Caught live, twice. **First:** a spec demanding two mutually exclusive rules got
+`code_bug` on round 1 (patch can't satisfy both), then on round 2 the model
+flipped the verdict to `test_bug` — its own reasoning said *"impossible given
+the code and the specification"* — and rewrote the tests to drop R2.
+`10 → 10 tests, 18 → 18 asserts`, so the count-based integrity guard waved it
+through and the run reported green. **Then, harder:** `many_bugs.py` fixed all
+14 genuine code bugs on round 1 and was left with two failures — one stray test
+bug and one contradictory spec. A single verdict bundled them, so rewriting the
+suite to correct the stray test *also* dropped the inconvenient requirement
+(`16 → 16 tests, 47 → 47 asserts` → green again). The count guard is
+structural: it cannot see a test rewritten to say the opposite.
+
+Three prompt rules now close it: `diagnose` answers `unclear` when the *spec*
+is self-contradictory (blaming either side is not a diagnosis); `diagnose` may
+only return `test_bug` when no failing test merely restates the docstring
+(otherwise one stray test bug becomes a licence to rewrite everything); and
+`patch` may never rewrite a test that asserts what the docstring explicitly
+requires. Each rule has a regression test in `testing/test_regressions.py`.
+
+The examples taught us a wording rule too. "Both are required, with **no
+precedence between them**" was read back as *"the specification does not require
+both readings to hold simultaneously"* — i.e. either/or — which made the R1
+tests look wrong and the run went green. Stating it as **"both must hold for the
+same call; this is not an either/or choice"** closed it. Concrete, same-input,
+incompatible outputs (`typical([1,2,3,4]) == 2` *and* `== 2.5`) matter more than
+any amount of prose about precedence.
+
+Two more findings, both from watching `ambiguous.py` flip between green and red:
+
+- **`generate` makes one global pick per run.** It chose a single reading for
+  all three functions, so adding more contradictory functions does *not* dilute
+  the risk — every run was all-green or all-red together. What actually decided
+  it was a line in the module docstring: **"The tests will check both rules; the
+  source can honour only one of them."** With it, `generate` wrote 3 tests per
+  function (clear case + R1 + R2 = 9 total) and the run was red 2/2; without it,
+  it wrote 2 (clear + one reading) and the run was green as often as not.
+- **A spec that is contested *everywhere* gives the generator nothing to hold
+  on to.** Pairing each contested case with a plainly documented case that must
+  pass is what makes the suite trustworthy enough to fail.
+
+**Honest limitation:** `integrity.py` compares counts, not meaning — a test
+rewritten to assert the opposite is invisible to it, and a prompt rule is only
+as good as the model reading it. A semantic check (does the assertion still
+reflect a stated requirement?) is genuinely open work, not something a regex
+can settle. This is also why the README lists *one verdict per run* as a known
+limitation: a file mixing a test bug with a broken spec still has to express
+itself in one word.
+
 ## Model IDs: verified, not trusted
 
 An external audit handed us a table of "current" model IDs. Several were wrong
@@ -104,22 +165,42 @@ demonstrate it.)
 
 ## Known gaps / honest limitations
 
+- **Single file only.** The source is copied into a temp dir as one module, so
+  relative imports, sibling modules and uninstalled third-party imports fail on
+  import — and TestPilot will then try to "fix" imports it has no business
+  touching. Self-contained files only.
+- **The sandbox is accident-proof, not adversarial-proof.** Temp dir, scrubbed
+  env, `HOME` redirected, rlimits, process-group kill on timeout. That stops
+  infinite loops and a test reading your real `~/.env`. It is not a container —
+  genuinely untrusted input wants `podman run --network none`.
 - **Gemini model IDs unverified** (403 without a key).
 - **`.env.example` contained real API keys.** Fixed — it is now a blank
   template (`.env`, which is gitignored, keeps the working keys). **Both keys
   should still be rotated** before this repo is shared or submitted, since they
   were in plaintext earlier in this session.
 - **`testing/` is temporary** by design; the shipped package does not depend on it.
-- **Free-tier rate limits are real.** Groq's 8000 TPM limit surfaces as a
-  transient `429`. `llm.py` retries up to 4 attempts, honouring the provider's
-  `Retry-After` header — or the `try again in Ns` hint in the JSON body when
-  only that is present — capped at 45s, with exponential fallback capped at 8s.
-  408/429/5xx retry; **401/404 fail fast** so a bad model ID never sleeps
-  through the retries. *Sustained* throttling (several files back-to-back on
-  one key) still degrades to an honest `gave_up` with the reason in the history
-  rather than crashing — which is the intended behaviour, not a silent pass.
-- **Gemini/OpenRouter code paths are exercised only through the shared
-  `HTTPChatLLM`**; only Groq was validated end-to-end this session.
+- **Free-tier rate limits are real, and Groq's are *daily*.** The free tier is
+  **200 000 tokens per day**, reported as
+  `on tokens per day (TPD): Limit 200000, Used 199188 … Please try again in 35.8s`.
+  `llm.py` retries up to 4 attempts honouring `Retry-After` — or the
+  `try again in Ns` hint in the JSON body when only that is present — capped at
+  45s, with exponential fallback capped at 8s. 408/429/5xx retry; **401/404 fail
+  fast** so a bad model ID never sleeps through the retries.
+  A body that mentions a spent quota **and** carries no usable wait schedule (or
+  asks for a wait longer than this CLI will block for) breaks out immediately
+  instead of burning four attempts — and the message quotes the provider's own
+  words rather than paraphrasing them into a claim we can't verify. That matters:
+  one early version asserted "daily quota exhausted" for a body that actually
+  said *tokens per day, try again in 9m50s*, which is a different and much more
+  actionable fact.
+- **Sustained throttling degrades to an honest `gave_up`** with the reason in
+  the history rather than crashing — intended behaviour, not a silent pass. A
+  hard `LLMError` is different: that stops the run as `error` (exit 2), because
+  an infrastructure failure must never be dressed up as a model verdict.
+- **OpenRouter was validated end-to-end this session** (both configured models,
+  `cohere/north-mini-code:free` and `nvidia/nemotron-3-super-120b-a12b:free`,
+  answered 200 from the live catalogue). Gemini's code paths are exercised only
+  through the shared `HTTPChatLLM`.
 
 ## Layout
 
@@ -137,11 +218,14 @@ demonstrate it.)
 ├── .env / .env.example  provider keys + model overrides
 ├── .github/workflows/ci.yml  offline CI: ruff + the full suite, no API keys
 ├── docs/               README screenshots (committed so no external image host)
-├── examples/            demo targets: off_by_one.py, correct_code_wrong_test.py,
-│                        ambiguous.py, python1/3/4/5/6.py (named pythonN.py on
-│                        purpose — a `test_*.py` name makes the launcher skip
-│                        the file as a test, not code under test)
-├── src/testpilot/       the package (cli, config, llm, parsing, prompts,
-│                        report, sandbox/, agent/)
-└── testing/             128 tests + ScriptedLLM  (temporary, deletable)
+├── examples/            demo targets. Green side: off_by_one.py,
+│                        correct_code_wrong_test.py, python1/3/4/5/6.py
+│                        (named pythonN.py on purpose — a `test_*.py` name makes the
+│                        launcher skip the file as a test, not code under test).
+│                        Red side (all verified exit 1): ambiguous.py,
+│                        conflicting_spec.py, impossible_spec.py, many_bugs.py —
+│                        written so they must end non-green
+├── src/testpilot/       the package (cli, config, integrity, llm, parsing,
+│                        prompts, report, sandbox/, agent/)
+└── testing/             157 tests + ScriptedLLM  (temporary, deletable)
 ```

@@ -2,31 +2,82 @@
 
 Design goals: zero extra memory, no Docker, works on an 8 GB laptop.
 
-Isolation is intentionally modest (temp dir + env scrub + wall-clock timeout):
-this protects the demo from *accidents* (infinite loops, runaway output), not
-from hostile code. The `Sandbox` interface exists so a real microVM backend
-(E2B / Modal / Firecracker) can be dropped in later.
+Isolation is deliberately modest: temp dir + scrubbed environment + HOME
+redirected into the temp dir + wall-clock timeout + process-group kill +
+CPU/file-size rlimits. This protects the demo from *accidents* (infinite
+loops, runaway output, generated code reading `~/.env`), not from hostile
+code — no `resource` limit stops a determined attacker, and the honest
+answer for untrusted input is a container (`podman run --network none`).
+The `Sandbox` interface exists so such a backend can be dropped in later.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
+from ..prompts import MODULE_NAME
 from .base import RunResult
 
-_MODULE_NAME = "testpilot_target"
+# Single source of truth: prompts.MODULE_NAME and the file the sandbox writes
+# must agree, or generated tests import a module that does not exist.
+_MODULE_NAME = MODULE_NAME
 
 
 # Per-stream cap read back from disk. pytest's summary line is at the end, so
 # the tail is the part that matters; a noisy test can gigabytes of stdout and we
 # still only ever hold this much in memory.
 _MAX_TAIL_BYTES = 512 * 1024
+
+# Address-space cap for the sandboxed interpreter (RLIMIT_AS). Generous enough
+# that pytest never trips it, tight enough that a runaway allocation dies
+# instead of swapping an 8 GB laptop to death.
+_SANDBOX_MEM_BYTES = int(os.getenv("TESTPILOT_SANDBOX_MEM_MB", "4096")) * 1024 * 1024
+
+
+def _resource_limits(cpu_seconds: int, max_bytes: int) -> Callable[[], None] | None:
+    """Build a preexec_fn applying CPU and address-space caps, or None.
+
+    Returns None on platforms without `resource` (Windows) instead of failing,
+    because the wall-clock timeout still works everywhere.
+    """
+    try:
+        import resource
+    except ImportError:  # pragma: no cover — Windows
+        return None
+
+    def _apply() -> None:
+        # Runs in the child before exec; an exception here would abort the
+        # whole run, so every limit is best-effort.
+        for name, soft, hard in (
+            ("RLIMIT_CPU", cpu_seconds, cpu_seconds + 2),
+            ("RLIMIT_AS", max_bytes, max_bytes),
+            ("RLIMIT_FSIZE", 64 * 1024 * 1024, 64 * 1024 * 1024),
+        ):
+            try:
+                resource.setrlimit(getattr(resource, name), (soft, hard))
+            except (ValueError, OSError):  # pragma: no cover
+                pass
+
+    return _apply
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the child AND everything it spawned (a test can fork a worker)."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def _read_tail(path: Path, limit: int = _MAX_TAIL_BYTES) -> str:
@@ -70,22 +121,29 @@ class LocalSubprocessSandbox:
 
     def run(self, source: str, test_code: str, timeout: int = 30) -> RunResult:
         started = time.monotonic()
+        if not self.pytest_available:
+            # Fail loudly instead of "degrading" to `unittest discover`:
+            # generated files are plain pytest functions, which unittest does
+            # not collect — the fallback reported "no tests collected" for
+            # perfectly good suites and the run then diagnosed *that*.
+            raise RuntimeError(
+                f"pytest is not available in {self.python!r}. TestPilot runs the "
+                "generated tests with pytest — install it (`uv sync`, or "
+                "`pip install pytest`) and run again."
+            )
+
         with tempfile.TemporaryDirectory(prefix="testpilot_") as tmp:
             tmp_path = Path(tmp)
             (tmp_path / f"{_MODULE_NAME}.py").write_text(source, encoding="utf-8")
             test_file = tmp_path / "test_generated.py"
             test_file.write_text(test_code, encoding="utf-8")
 
-            if self.pytest_available:
-                cmd = [
-                    self.python, "-m", "pytest", str(test_file),
-                    "-q", "--no-header", "-p", "no:cacheprovider", "--tb=short",
-                ]
-            else:
-                # Graceful degradation: run the file directly with unittest.
-                cmd = [self.python, "-m", "unittest", "discover", "-s", tmp, "-p", "test_*.py"]
+            cmd = [
+                self.python, "-m", "pytest", str(test_file),
+                "-q", "--no-header", "-p", "no:cacheprovider", "--tb=short",
+            ]
 
-            env = self._clean_env()
+            env = self._clean_env(tmp)
             # Stream to files on disk rather than PIPEs: a runaway `while True:
             # print(...)` inside the timeout window would otherwise buffer
             # gigabytes into RAM (OOM on an 8 GB laptop). pytest prints its
@@ -96,18 +154,33 @@ class LocalSubprocessSandbox:
             with out_path.open("w", encoding="utf-8") as out_fh, err_path.open(
                 "w", encoding="utf-8"
             ) as err_fh:
+                # start_new_session puts the child (and anything it spawns) in
+                # its own process group, so a timeout can kill the whole group:
+                # killing just the direct child leaves a forked worker running.
+                # stdin is DEVNULL so a test that calls input() gets EOF now
+                # rather than hanging until the timeout.
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=tmp,
+                    env=env,
+                    stdout=out_fh,
+                    stderr=err_fh,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                    # preexec_fn forks; that is only unsafe if another thread
+                    # can run during the fork, and this CLI is single-threaded.
+                    # RLIMIT_* has no other POSIX spelling.
+                    preexec_fn=_resource_limits(timeout + 5, _SANDBOX_MEM_BYTES),  # noqa: PLW1509
+                )
                 try:
-                    subprocess.run(
-                        cmd,
-                        cwd=tmp,
-                        env=env,
-                        stdout=out_fh,
-                        stderr=err_fh,
-                        timeout=timeout,
-                        check=False,  # non-zero is normal: failing tests ARE the signal
-                    )
+                    proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     timed_out = True
+                    _kill_group(proc)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:  # pragma: no cover
+                        pass
 
             stdout = _read_tail(out_path)
             stderr = _read_tail(err_path)
@@ -133,16 +206,25 @@ class LocalSubprocessSandbox:
         # lands as errors=1 and an all-skipped run lands as skipped=1.
         return result
 
-    def _clean_env(self) -> dict[str, str]:
-        """Minimal environment: no API keys leak into generated code."""
-        keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONPATH")
+    @staticmethod
+    def _clean_env(tmp: str) -> dict[str, str]:
+        """Minimal environment for code TestPilot did not write.
+
+        - Only whitelisted variable *names* are copied, so no API key can leak
+          in by name.
+        - HOME points into the temp dir, so `Path.home()`, `~/.env`, shell
+          history and `~/.ssh` are all out of reach of the generated tests.
+        - PYTHONPATH no longer carries this repo's `src/`: generated tests
+          import `testpilot_target` from their own working directory, and the
+          package tree lives next to the real `.env` — exposing it bought
+          nothing and cost exactly what it looked like it cost.
+        """
+        keep = ("PATH", "LANG", "LC_ALL", "TMPDIR")
         env = {k: v for k, v in os.environ.items() if k in keep}
+        env["HOME"] = tmp
         env["PYTHONHASHSEED"] = "0"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        # Make the package importable from generated tests if needed.
-        src = str(Path(__file__).resolve().parents[2])
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{src}{os.pathsep}{existing}" if existing else src
+        env["PYTHONPATH"] = tmp
         return env
 
     @staticmethod

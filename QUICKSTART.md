@@ -78,7 +78,7 @@ TestPilot on examples/off_by_one.py  (provider: groq)
 
 …followed by the status panel, loop history, diagnosis and a unified diff.
 
-**Exit codes:** `0` = tests green · `1` = unclear / gave up · `2` = config error (e.g. no API key).
+**Exit codes:** `0` = tests green · `1` = unclear / gave up · `2` = config error (e.g. no API key) **or** the run was interrupted (rate limit, unparseable diagnosis, no test code).
 
 ---
 
@@ -96,29 +96,37 @@ uv run testpilot --version
 
 ---
 
-## Try all three examples
+## Try the examples
 
 ```bash
-uv run testpilot run examples/off_by_one.py            # bug in the CODE  -> fixes source
+uv run testpilot run examples/off_by_one.py               # bug in the CODE -> fixes source
 uv run testpilot run examples/correct_code_wrong_test.py  # bug in the TEST -> fixes test
-uv run testpilot run examples/ambiguous.py             # undecidable      -> stops, says "unclear"
+uv run testpilot run examples/conflicting_spec.py         # broken spec     -> stops, says "unclear"
 ```
 
-| Example | Expected status |
-|---------|-----------------|
-| `off_by_one.py` | ✅ green (patches the source → `.fixed.py`) |
-| `correct_code_wrong_test.py` | ✅ green (patches the generated test, source untouched) |
-| `ambiguous.py` | 🤔 `unclear` — honest stop, no changes made |
+| Example | Expected status | Exit |
+|---------|-----------------|------|
+| `off_by_one.py` | ✅ green (patches the source → `.fixed.py`) | 0 |
+| `correct_code_wrong_test.py` | ✅ green (patches the generated test, source untouched) | 0 |
+| `ambiguous.py` | 🤔 `unclear` — a clear case beside a contested one | 1 |
+| `conflicting_spec.py` | 🤔 `unclear` — four specs that contradict themselves | 1 |
+| `impossible_spec.py` | 🤔 `unclear` — requirements nothing can satisfy | 1 |
+| `many_bugs.py` | 🤔 `unclear` — 14 real bugs named, then the broken spec stops it | 1 |
+
+The four on the bottom all end the same way: **the specification is broken**,
+not the code and not the tests. Every one of them was run against a live LLM
+to confirm the exit code above.
 
 Your original file is **never modified**. Fixes are shown as a diff and only
-written to `<name>.fixed.py` when you pass `--write`.
+written to `<name>.fixed.py` when you pass `--write`, and only if the run
+actually ended green.
 
 ---
 
 ## Run the tests
 
 ```bash
-uv run pytest testing/            # full suite (~25s, 57 tests, no API credits used)
+uv run pytest testing/            # full suite (~30s, 157 tests, no API credits used)
 uv run pytest testing/ -v         # verbose
 uv run pytest testing/test_e2e_loop.py   # just the end-to-end agent loop
 ```

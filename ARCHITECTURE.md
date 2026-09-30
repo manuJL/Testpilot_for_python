@@ -36,33 +36,42 @@ streams the child's stdout/stderr to *files on disk* rather than pipes so that
 a runaway `print` loop can never balloon the parent's memory; it then reads back
 only a bounded tail and parses the counts from the **final summary line only** —
 never from the whole buffer, so a test that prints `"2 passed"` cannot inflate
-the totals or fake a green run — while also handling `skipped` counts and the
-unittest fallback's `Ran N tests … OK` / `FAILED (failures=1)` shapes. If the
+the totals or fake a green run — while also handling `skipped` counts and
+pytest's `error`/`xfailed` shapes. If the
 run is green, or the iteration budget is spent, the router sends you straight to
 `report`; otherwise `diagnose` runs, feeding the source, the generated tests and
 the raw output to the model and demanding exactly one JSON object back,
 `{"verdict": "code_bug" | "test_bug" | "unclear", "reasoning", "instructions"}`,
 which `parsing.extract_json()` pulls out with a balanced-brace scanner that
-survives nested objects and braces inside string values, and an unparseable or
-out-of-vocabulary verdict is normalized to `unclear` rather than trusted. The
+survives nested objects and braces inside string values. An unparseable or
+out-of-vocabulary verdict gets **one** corrective retry quoting the schema back;
+if the second answer still isn't valid, the run stops as `error` (exit 2)
+instead of quietly recording a fabricated `unclear`. The
 `patch` node then applies the fix to *whichever side was blamed* — `patch_code`
 rewrites the source, `patch_test` rewrites the tests — validating the model's
 output as real Python and quietly keeping the previous file if it is not
 (so a bad model response can never degrade a working file), while the
 `code_patched`/`tests_patched` flags are **sticky ORs** so a later no-op patch
 cannot clear an earlier successful one and silently cost you the fix at
-`--write` time; control then loops back to `run`, and this repeats until green,
-until the budget is exhausted, or until the model admits `unclear`. Throughout,
+`--write` time; before any patch is accepted, `integrity.py` checks that the
+suite still imports the target module, still contains its tests and hasn't
+dropped assertions, so a "fix" that deletes the failing test is thrown away and
+costs the iteration; control then loops back to `run`, and this repeats until
+green, until the budget is exhausted, or until the model admits `unclear`.
+Throughout,
 LangGraph's append reducers on `history` and `notes` mean no node can clobber
 another node's log entries, and `run_file()` streams the graph so that even if a
-node dies part-way — a transient `HTTP 429` from a free-tier provider, or
-hitting the graph step limit — you keep everything completed so far and get an
-honest `gave_up` status with the reason in the history instead of a stack trace.
-Finally `report` renders a Rich table of the loop history, the diagnosis, and a
-unified diff of the suggested change; your original file is **never modified**
-unless you pass `--write`, which writes `<name>.fixed.py` as a sibling and is
-honoured in both human and `--json` output modes; and the process exits **0** for
-green, **1** for `unclear`/`gave_up`, **2** for configuration or runtime errors —
+node dies part-way — a provider refusing the request, or hitting the graph step
+limit — you keep everything completed so far and get an honest report: an
+`LLMError` stops the run as `error` (exit 2), because an infrastructure failure
+must never be presented as a model verdict. Finally `report` renders a Rich
+table of the loop history, the diagnosis, and a
+unified diff of the suggested change; your original file is **never modified**,
+and `--write` — which writes `<name>.fixed.py` as a sibling, in both human and
+`--json` output modes — only ever writes when the run actually ended green; and
+the process exits **0** for
+green, **1** for `unclear`/`gave_up`, **2** for configuration errors *and*
+interrupted runs —
 so the exit code alone tells a script what happened.
 
 ---
@@ -97,13 +106,14 @@ class Sandbox(Protocol):                  # sandbox/base.py
 | `config.py` | Provider/model resolution, `.env`, `MissingAPIKeyError` |
 | `llm.py` | `LLM` protocol, `HTTPChatLLM`, `LLMError`, friendly HTTP errors |
 | `prompts.py` | All prompt templates and their builders |
-| `parsing.py` | `extract_code`, `extract_all_code`, `extract_json`, `strip_fences` |
+| `parsing.py` | `extract_code`, `extract_all_code`, `extract_json` |
+| `integrity.py` | Does this suite actually test anything? (`analyse`, `usability_reason`, `degradation_reason`) |
 | `report.py` | `render()`, `unified_diff()`, `write_fixed_file()` |
 | `sandbox/base.py` | `Sandbox` protocol + `RunResult` (the only test-run vocabulary) |
 | `sandbox/local.py` | Temp-dir subprocess runner, output parsing, env scrub |
 | `agent/state.py` | `AgentState` TypedDict + `new_state()` |
 | `agent/generate.py` | GENERATE node |
-| `agent/diagnose.py` | DIAGNOSE node + verdict normalization |
+| `agent/diagnose.py` | DIAGNOSE node + one corrective retry on a bad verdict |
 | `agent/patch.py` | PATCH node, sticky flags |
 | `agent/loop.py` | Graph construction, routers, `run_file()` |
 
@@ -156,9 +166,11 @@ code change:
 |---|---|
 | `GROQ_API_KEY` / `OPENROUTER_API_KEY` / `GEMINI_API_KEY` | Whichever exists first (in `PROVIDER_ORDER`) wins |
 | `TESTPILOT_PROVIDER` / `--provider` | Force a provider (warns and falls back if unusable) |
-| `TESTPILOT_GENERATE_MODEL` / `TESTPILOT_DIAGNOSE_MODEL` / `--model` | Override model IDs per step |
-| `TESTPILOT_MAX_ITERATIONS` / `--max-iterations` | Loop budget (default 4, CLI caps at 10) |
+| `TESTPILOT_GENERATE_MODEL` / `TESTPILOT_DIAGNOSE_MODEL` / `TESTPILOT_PATCH_MODEL` / `--model` | Override model IDs per step. The patch step defaults to the *deep* model — rewriting a file is the most token-heavy thing the loop does, so it doesn't share the fast model's budget |
+| `TESTPILOT_MAX_ITER` / `--max-iterations` (`-n`) | Loop budget (default 4, CLI caps at 10) |
+| `TESTPILOT_MAX_TOKENS` / `TESTPILOT_HTTP_TIMEOUT` | Completion budget per call (default 8192, capped at 32768), HTTP timeout (default 120s) |
 | `TESTPILOT_TIMEOUT` / `TESTPILOT_TEMPERATURE` | Sandbox timeout, sampling temperature |
+| `TESTPILOT_SANDBOX_MEM_MB` | Address-space rlimit handed to generated code (default 4096) |
 
 Model tables (`GROQ_MODELS`, `OPENROUTER_MODELS`, `GEMINI_MODELS`) hold IDs
 verified against each provider's live `/models` endpoint. See

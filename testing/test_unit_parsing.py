@@ -2,7 +2,7 @@
 
 import pytest
 
-from testpilot.parsing import extract_all_code, extract_code, extract_json, strip_fences
+from testpilot.parsing import extract_code, extract_json
 
 
 class TestExtractCode:
@@ -47,26 +47,25 @@ class TestExtractJson:
             extract_json('["not", "an", "object"]')
 
 
-class TestHelpers:
-    def test_extract_all_code_returns_both_blocks(self):
-        text = "```python\na=1\n```\ntext\n```python\nb=2\n```"
-        assert extract_all_code(text) == ["a=1", "b=2"]
+class TestJsonPreference:
+    """extract_json must pick the ANSWER, not the first brace it sees."""
 
-    def test_strip_fences_removes_wrapper(self):
-        assert strip_fences("```python\nx = 1\n```") == "x = 1"
+    def test_prefers_the_object_carrying_the_verdict(self):
+        # Reasoning text that contains its own little JSON illustration used
+        # to win, silently defaulting a real verdict to unclear.
+        text = 'For example {"a": 1} is illustrative. Final answer: {"verdict": "code_bug", "reasoning": "r"}'
+        assert extract_json(text)["verdict"] == "code_bug"
 
-    def test_strip_fences_leaves_plain_text(self):
-        assert strip_fences("x = 1") == "x = 1"
+    def test_prefers_verdict_even_when_it_comes_first_in_prose(self):
+        text = '{"verdict": "test_bug"} is my call, unlike {"note": 1}'
+        assert extract_json(text)["verdict"] == "test_bug"
 
-    def test_strip_fences_handles_prose_before_fence(self):
-        # Regression: was re.fullmatch, so prose around the fence no-op'd.
-        text = "Sure! Here is the file:\n```python\nx = 1\n```\nHope that helps."
-        assert strip_fences(text) == "x = 1"
+    def test_falls_back_to_the_last_object_when_no_answer_key(self):
+        text = 'first {"a": 1} then {"b": 2}'
+        assert extract_json(text) == {"b": 2}
 
-    def test_strip_fences_handles_prose_after_fence_only(self):
-        text = "```py\ny = 2\n```\nDone."
-        assert strip_fences(text) == "y = 2"
-
-    def test_strip_fences_preserves_inner_multiline(self):
-        text = "intro\n```python\ndef a():\n    return 1\n```\noutro"
-        assert strip_fences(text) == "def a():\n    return 1"
+    def test_unbalanced_quote_in_prose_does_not_hide_the_object(self):
+        # `_balanced_spans` used to start string mode at depth 0, so a lone
+        # quote in the prose (`6" pipe`) swallowed every brace after it.
+        text = 'bought the 6" pipe {"verdict": "unclear", "reasoning": "r"}'
+        assert extract_json(text)["verdict"] == "unclear"

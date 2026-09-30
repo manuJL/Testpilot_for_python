@@ -58,20 +58,37 @@ Decide WHO is wrong. Answer with ONE JSON object and nothing else:
 {"verdict": "code_bug", "reasoning": "...", "instructions": "..."}
 
 Where "verdict" is exactly one of: "code_bug", "test_bug", "unclear".
-Example of a complete, valid answer:
+Two complete, valid answers — copy the SHAPE, not the verdict:
 
 {"verdict": "test_bug", "reasoning": "test_add expects -1 but 2+3 is 5", "instructions": "assert 5"}
+
+{"verdict": "code_bug", "reasoning": "multiply() returns a - b while its docstring says product", "instructions": "return a * b"}
+
+The verdict must follow the evidence; do not pick whichever one appears above.
 
 Guidelines:
 - "test_bug": the implementation matches its documented intent; the test asserts
   wrong behaviour (wrong expectation, wrong assumption, testing the wrong thing).
   Also use it when the test file itself is broken (syntax error, bad import,
   no tests collected).
+  A test that merely restates what the source's docstring requires is NEVER the
+  bug: if it fails, either the code does not meet its own docstring (`code_bug`)
+  or the docstring contradicts itself (`unclear`). You may return `test_bug`
+  only when no failing test does that — otherwise one genuine test bug in the
+  batch would let you rewrite the whole suite and quietly drop every
+  requirement that happens to be inconvenient.
 - "code_bug": the implementation contradicts its docstring/comment/example, or
   crashes on valid input described by the spec.
 - "unclear": the spec does not disambiguate — e.g. behaviour is undocumented and
   both readings are plausible, or the output gives no useful signal.
+- "unclear" is ALSO the verdict when the SPECIFICATION demands two mutually
+  exclusive things. Do not break that tie by blaming one side: `test_bug` makes
+  the run go green by deleting a requirement the docstring states, and
+  `code_bug` makes it oscillate until the budget runs out. Neither is a
+  diagnosis — the spec itself is what is broken, and saying so is the point.
 - NEVER choose unclear when the docstring or an example clearly settles it.
+  An under-specified detail and a self-contradictory spec are different things:
+  only the second one is unclear.
 
 Respond with raw JSON only: no markdown, no code fences, no commentary.
 """
@@ -118,6 +135,14 @@ Output rules:
 - Preserve the original formatting, comments and docstrings.
 - Never add new dependencies.
 - Never wrap the file in anything else (no prose before or after the block).
+- When repairing a TEST file: never delete a failing test, never weaken an
+  assertion (`assert True`, a dropped expectation), and never remove the import
+  of the module under test. Those edits do not fix anything — they are rejected
+  by TestPilot and cost you an iteration. Correct the expectation instead.
+- A test asserting something the source's docstring explicitly requires is NOT
+  a wrong test, however impossible it looks beside the code. Rewriting it to
+  match the code deletes the requirement and fakes a pass. Keep the test; the
+  contradiction belongs to the specification, not to the suite.
 """
 
 PATCH_CODE_USER = """\

@@ -11,11 +11,14 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
-load_dotenv()
+# find_dotenv(usecwd=True) anchors the search at the *current working
+# directory*. A bare load_dotenv() starts from the file that calls it, which
+# works for an editable install inside the repo but silently misses .env when
+# the package is installed normally and run from anywhere else.
+load_dotenv(find_dotenv(usecwd=True))
 
 # Ordered fallbacks: first provider with an API key wins.
 PROVIDER_ORDER = ("groq", "openrouter", "gemini")
@@ -76,6 +79,9 @@ DEFAULT_DIAGNOSE_MODEL = {
     "gemini": GEMINI_MODELS["deep"],
 }
 
+# Patching writes real code, so it gets the same strength as diagnosis.
+DEFAULT_PATCH_MODEL = dict(DEFAULT_DIAGNOSE_MODEL)
+
 # Friendly, user-facing message shown whenever no API key is configured.
 MISSING_KEY_MESSAGE = (
     "API key is not found. Please open .env and add the API key to continue.\n"
@@ -101,6 +107,9 @@ class Config:
     diagnose_model: str = field(
         default_factory=lambda: os.getenv("TESTPILOT_DIAGNOSE_MODEL", "")
     )
+    patch_model: str = field(
+        default_factory=lambda: os.getenv("TESTPILOT_PATCH_MODEL", "")
+    )
     max_iterations: int = field(
         default_factory=lambda: int(os.getenv("TESTPILOT_MAX_ITER", "4"))
     )
@@ -109,6 +118,12 @@ class Config:
     )
     temperature: float = field(
         default_factory=lambda: float(os.getenv("TESTPILOT_TEMPERATURE", "0.2"))
+    )
+    # Reasoning models burn part of this on thinking before writing any output,
+    # so it defaults well above the old hard-coded 4096 (which could truncate a
+    # generated file mid-fence). Override with TESTPILOT_MAX_TOKENS.
+    max_tokens: int = field(
+        default_factory=lambda: int(os.getenv("TESTPILOT_MAX_TOKENS", "8192"))
     )
     # Set once a provider warning has been emitted, so the preflight (cli.py)
     # and the client (llm.py) don't both print the same message.
@@ -166,11 +181,17 @@ class Config:
         raise MissingAPIKeyError(MISSING_KEY_MESSAGE)
 
     def model_for(self, step: str) -> str:
-        """Return the model ID for a given step (generate | diagnose).
+        """Return the model ID for a given step (generate | diagnose | patch).
 
         Priority:
         1. Explicit env var / instance attribute
         2. Provider-specific default from the tables above
+
+        `patch` deliberately maps to the *deep* model, not the fast one:
+        rewriting the user's source (or a failing test) is the step where a
+        weak model does the most damage — a subtle "fix" that passes the suite
+        while breaking the intent. `generate` keeps the fast model, where the
+        cost is low and a re-prompt is cheap.
         """
         # quiet: this runs once per LLM request; the warning belongs to the
         # preflight in cli.py, not to every generate/diagnose/patch call.
@@ -179,19 +200,14 @@ class Config:
         # Explicit override wins (strip so a whitespace-only value is ignored)
         if step == "diagnose" and self.diagnose_model.strip():
             return self.diagnose_model.strip()
-        if step != "diagnose" and self.generate_model.strip():
+        if step == "patch" and self.patch_model.strip():
+            return self.patch_model.strip()
+        if step not in ("diagnose", "patch") and self.generate_model.strip():
             return self.generate_model.strip()
 
         # Fall back to the curated defaults
         if step == "diagnose":
             return DEFAULT_DIAGNOSE_MODEL.get(provider, DEFAULT_DIAGNOSE_MODEL["groq"])
+        if step == "patch":
+            return DEFAULT_PATCH_MODEL.get(provider, DEFAULT_PATCH_MODEL["groq"])
         return DEFAULT_GENERATE_MODEL.get(provider, DEFAULT_GENERATE_MODEL["groq"])
-
-
-def find_repo_root(start: Path | None = None) -> Path:
-    """Walk up looking for pyproject.toml; fall back to CWD."""
-    current = (start or Path.cwd()).resolve()
-    for candidate in [current, *current.parents]:
-        if (candidate / "pyproject.toml").exists():
-            return candidate
-    return current

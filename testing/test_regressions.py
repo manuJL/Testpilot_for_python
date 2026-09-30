@@ -314,3 +314,61 @@ class TestModuleNameContract:
         rendered = generate_messages("def f(): return 1")[0]["content"]
         assert MODULE_NAME in rendered
         assert f"import {MODULE_NAME}" in rendered
+
+
+class TestNoFakeGreenRules:
+    """Two load-bearing prompt rules, locked down so they stay in.
+
+    Observed live: a spec demanding two mutually exclusive rules was diagnosed
+    `code_bug` on round 1 (no patch can satisfy both), then on round 2 the model
+    flipped the verdict to `test_bug` — its own reasoning admitting the
+    requirement was "impossible given the code and the specification" — and
+    rewrote the suite to drop it. The counts came out identical (10 -> 10 tests,
+    18 -> 18 asserts), so `integrity.py` could not see the difference and the run
+    reported green.
+
+    Counts cannot catch that; only the prompts can. Removing either rule below
+    re-opens the hole, so assert on the exact strings that carry them.
+
+    The prompts are hard-wrapped, so compare against whitespace-normalised text
+    — asserting on a phrase that happens to sit across a line break would make
+    this test fail for the wrong reason.
+    """
+
+    @staticmethod
+    def _flat(text: str) -> str:
+        return " ".join(text.split())
+
+    def test_diagnose_must_not_break_a_spec_contradiction_by_blaming_one_side(self):
+        from testpilot.prompts import DIAGNOSE_SYSTEM
+
+        flat = self._flat(DIAGNOSE_SYSTEM)
+        assert "mutually exclusive" in flat
+        assert "deleting a requirement the docstring states" in flat
+
+    def test_diagnose_keeps_the_counter_rule_that_unclear_is_not_a_default(self):
+        # The new rule must not swallow the old one: an under-specified detail
+        # still has a right answer and still needs a verdict.
+        from testpilot.prompts import DIAGNOSE_SYSTEM
+
+        assert "NEVER choose unclear" in DIAGNOSE_SYSTEM
+
+    def test_a_docstring_restating_test_can_never_be_the_blamed_side(self):
+        # Observed live: 14 real code bugs fixed on round 1 left two failures —
+        # one genuine test bug plus one self-contradictory spec. The single
+        # verdict bundled them as `test_bug`, so rewriting the suite to fix the
+        # stray test ALSO dropped the inconvenient requirement, and the run
+        # reported green (16 -> 16 tests, 47 -> 47 asserts, invisible to the
+        # count-based integrity guard).
+        from testpilot.prompts import DIAGNOSE_SYSTEM
+
+        flat = " ".join(DIAGNOSE_SYSTEM.split())
+        assert "merely restates what the source's docstring requires is NEVER" in flat
+        assert "only when no failing test does that" in flat
+
+    def test_patch_is_forbidden_to_rewrite_a_test_that_quotes_the_docstring(self):
+        from testpilot.prompts import PATCH_SYSTEM
+
+        flat = self._flat(PATCH_SYSTEM)
+        assert "docstring explicitly requires" in flat
+        assert "fakes a pass" in flat

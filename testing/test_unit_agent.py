@@ -20,15 +20,37 @@ class TestDiagnose:
         assert out["reasoning"] == "r"
         assert out["instructions"] == "i"
 
-    def test_invalid_verdict_becomes_unclear(self):
+    def test_invalid_verdict_becomes_an_error(self):
+        # An invented verdict is a model failure, not an ambiguity in the code.
         llm = ScriptedLLM(responses={"diagnose": ['{"verdict": "banana", "reasoning": "x"}']})
         out = diagnose(llm, "src", "tests", run_result())
-        assert out["verdict"] == "unclear"
+        assert out["verdict"] == "unclear"      # still routes to REPORT
+        assert "error" in out                   # but is reported as an error
+        assert "banana" in out["error"]
 
-    def test_unparseable_output_becomes_unclear(self):
-        llm = ScriptedLLM(responses={"diagnose": ["I am not sure what to say here."]})
+    def test_unparseable_output_retries_once_then_succeeds(self):
+        llm = ScriptedLLM(
+            responses={
+                "diagnose": [
+                    "I am not sure what to say here.",
+                    '{"verdict": "code_bug", "reasoning": "r", "instructions": "i"}',
+                ]
+            }
+        )
         out = diagnose(llm, "src", "tests", run_result())
-        assert out["verdict"] == "unclear"
+        assert out["verdict"] == "code_bug"
+        assert "error" not in out
+        assert len(llm.calls) == 2, "must re-prompt with feedback before giving up"
+
+    def test_unparseable_output_twice_is_an_error_not_unclear(self):
+        # Two unparseable replies = the model never answered. Claiming
+        # "honest stop, I can't tell who is wrong" would be a lie.
+        llm = ScriptedLLM(
+            responses={"diagnose": ["I am not sure what to say here.", "nor do I know."]}
+        )
+        out = diagnose(llm, "src", "tests", run_result())
+        assert out["verdict"] == "unclear"      # keeps the router pointed at REPORT
+        assert "error" in out                   # the report shows ERROR, not UNCLEAR
         assert "unparseable" in out["reasoning"]
 
     def test_missing_keys_default_safely(self):

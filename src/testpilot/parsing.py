@@ -11,11 +11,15 @@ _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IG
 
 
 def _balanced_spans(text: str) -> list[str]:
-    """Yield top-level {...} spans using real brace matching.
+    """Return top-level {...} spans using real brace matching.
 
     Handles nested objects/arrays and braces inside JSON strings — the naive
     `find("{") .. rfind("}")` and the non-greedy `.*?` regex both break on
     prose that trails the object or on `{"a": {"b": 1}}`.
+
+    Quote tracking only applies *inside* a span (`depth > 0`): an unbalanced
+    quote in the surrounding prose — `the 6" pipe` — must not swallow the
+    braces that follow it.
     """
     spans: list[str] = []
     depth = 0
@@ -31,7 +35,7 @@ def _balanced_spans(text: str) -> list[str]:
             elif ch == '"':
                 in_string = False
             continue
-        if ch == '"':
+        if depth > 0 and ch == '"':
             in_string = True
         elif ch == "{":
             if depth == 0:
@@ -50,27 +54,26 @@ def extract_code(text: str) -> str:
 
     Prefers the longest block rather than the first: models often restate the
     original file briefly before emitting the full replacement, and the full
-    file is the one worth keeping. Falls back to any fence, then the whole string.
+    file is the one worth keeping. The language tag is optional, so an untagged
+    ``` fence is matched by the same regex — no second pass needed.
     """
     blocks = _FENCE_RE.findall(text)
     if blocks:
         # Prefer the longest block — usually the full file.
         return max(blocks, key=len).strip("\n")
 
-    # A bare fence with no language tag.
-    bare = re.findall(r"```\s*\n(.*?)```", text, re.DOTALL)
-    if bare:
-        return max(bare, key=len).strip("\n")
-
     return text.strip()
 
 
-def extract_all_code(text: str) -> list[str]:
-    return [block.strip("\n") for block in _FENCE_RE.findall(text)]
-
-
 def extract_json(text: str) -> dict[str, Any]:
-    """Parse a JSON object from LLM output; tolerate fences and prose."""
+    """Parse a JSON object from LLM output; tolerate fences and prose.
+
+    Several objects may parse — reasoning text routinely contains its own
+    little `{"a": 1}` illustration, and the first one found used to win, which
+    silently defaulted a real verdict to `unclear`. So: prefer the object that
+    actually carries the answer key we asked for, and failing that the LAST
+    object, which is where a model restates its final answer.
+    """
     text = text.strip()
 
     candidates: list[str] = []
@@ -81,23 +84,21 @@ def extract_json(text: str) -> dict[str, Any]:
 
     candidates.append(text)
 
+    found: list[dict[str, Any]] = []
     for candidate in candidates:
         try:
             data = json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
             continue
         if isinstance(data, dict):
-            return data
+            found.append(data)
 
-    raise ValueError(f"Could not extract JSON from model output: {text[:300]!r}")
+    if not found:
+        raise ValueError(f"Could not extract JSON from model output: {text[:300]!r}")
 
+    for key in ("verdict", "answer", "result"):
+        for data in found:
+            if key in data:
+                return data
 
-def strip_fences(text: str) -> str:
-    """Extract the first fenced block, tolerating prose around it.
-
-    Uses re.search (not fullmatch) so "here you go:\n```py\nx=1\n```"
-    returns the inner code instead of silently no-op'ing. Plain text with
-    no fence at all is returned unchanged.
-    """
-    match = re.search(r"```[a-zA-Z]*[ \t]*\n(.*?)\n?```", text, re.DOTALL)
-    return match.group(1) if match else text
+    return found[-1]

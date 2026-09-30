@@ -14,11 +14,17 @@ from typing import Annotated, Any, TypedDict
 from ..config import Config
 from ..sandbox.base import RunResult
 
-# running | green | unclear | gave_up
+# running | green | unclear | gave_up | error
 STATUS_RUNNING = "running"
 STATUS_GREEN = "green"
 STATUS_UNCLEAR = "unclear"
+# Budget genuinely spent (or graph step limit hit).
 STATUS_GAVE_UP = "gave_up"
+# The run was cut short by something OTHER than the budget: an LLM failure
+# (rate limit, timeout, auth), an unparseable diagnosis, or no test code at
+# all. Conflating this with gave_up would print "budget exhausted" for a 429,
+# so it gets its own status and its own exit code (2).
+STATUS_ERROR = "error"
 
 
 class AgentState(TypedDict, total=False):
@@ -37,6 +43,10 @@ class AgentState(TypedDict, total=False):
     diagnosis: dict[str, Any] | None
     code_patched: bool
     tests_patched: bool
+    # How many patches in a row changed nothing (invalid output, an unchanged
+    # file, or a patch rejected by integrity). Two in a row means the model is
+    # looping, so the run stops instead of burning the whole budget.
+    consecutive_no_progress: int
 
     # Bookkeeping
     status: str
@@ -61,6 +71,7 @@ def new_state(source_path: Path, source: str, config: Config) -> AgentState:
         "diagnosis": None,
         "code_patched": False,
         "tests_patched": False,
+        "consecutive_no_progress": 0,
         "status": STATUS_RUNNING,
         "notes": [],
         "history": [],

@@ -10,6 +10,7 @@ ever talks to a real provider, and refuses to start without an API key.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Protocol
@@ -32,6 +33,34 @@ _MAX_BACKOFF = 8.0
 _MAX_HINT_WAIT = 45.0
 # Groq sometimes says it in the body only: "Please try again in 14.025s."
 _BODY_HINT = re.compile(r"try again in ([\d.]+)s")
+
+# Reasoning models (gpt-oss, Nemotron) spend part of `max_tokens` on thinking,
+# so a small budget can truncate a generated file mid-fence. One doubling
+# retry, then an error naming the env var — beats handing the patcher garbage.
+_MAX_TOKENS = 8192
+_MAX_TOKENS_CAP = 32768
+# 60s was too short for a big reasoning model at a high token budget, and the
+# timeout was retried four times — each attempt failing the same way.
+_HTTP_TIMEOUT = float(os.getenv("TESTPILOT_HTTP_TIMEOUT", "120"))
+# "Waiting will not help" — a spent daily/monthly quota.
+_EXHAUSTED_HINT = re.compile(r"daily|per day|monthly|quota exceeded|quota limit", re.IGNORECASE)
+# "This one probably will."
+_TRANSIENT_HINT = re.compile(
+    r"rate limit|too many requests|temporarily|try again|overloaded|server error", re.IGNORECASE
+)
+
+
+def _hit_token_limit(data: dict) -> bool:
+    """Did the provider stop because it ran out of output tokens?"""
+    try:
+        return data["choices"][0].get("finish_reason") == "length"
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return False
+
+
+def _balanced_fences(content: str) -> bool:
+    """True when no code fence is left open (i.e. the reply wasn't cut off)."""
+    return content.count("```") % 2 == 0
 
 
 def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
@@ -66,15 +95,39 @@ class HTTPChatLLM:
         self.config = config or Config()
         self.provider, self.api_key = self.config.resolve_provider()
         self.base_url = PROVIDER_BASE_URLS[self.provider]
-        self._client = client or httpx.Client(timeout=60.0)
+        self._client = client or httpx.Client(timeout=_HTTP_TIMEOUT)
 
     def chat(self, step: str, messages: list[Message]) -> str:
         model = self.config.model_for(step)
+        max_tokens = max(1024, int(getattr(self.config, "max_tokens", _MAX_TOKENS)))
+
+        data = self._post(model, messages, max_tokens)
+        content = self._content(data)
+
+        # A reasoning model that ran the budget out emits an unterminated code
+        # fence; extract_code() then falls back to the raw text and the patch
+        # step reports "invalid Python, kept previous" — an iteration burnt and
+        # no visible cause. Re-ask with a doubled budget before giving up.
+        if _hit_token_limit(data) and not _balanced_fences(content):
+            max_tokens = min(max_tokens * 2, _MAX_TOKENS_CAP)
+            data = self._post(model, messages, max_tokens)
+            content = self._content(data)
+            if _hit_token_limit(data) and not _balanced_fences(content):
+                raise LLMError(
+                    f"{model} hit max_tokens={max_tokens} and the reply is still "
+                    "truncated. Raise TESTPILOT_MAX_TOKENS (or "
+                    "TESTPILOT_MAX_TOKENS=... in .env), or pick a model with a "
+                    "larger output limit."
+                )
+        return content
+
+    def _post(self, model: str, messages: list[Message], max_tokens: int) -> dict:
+        """POST /chat/completions, retrying transient failures. Returns the body."""
         payload = {
             "model": model,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -85,6 +138,7 @@ class HTTPChatLLM:
             headers["X-Title"] = "TestPilot"
 
         data: dict | None = None
+        exhausted_body = ""
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 response = self._client.post(
@@ -99,16 +153,43 @@ class HTTPChatLLM:
                 # raises httpx.DecodingError. Either would otherwise escape
                 # LLMError and abort the whole run with no report.
                 data = response.json()
+                # OpenRouter answers HTTP 200 with an {"error": ...} body for
+                # some failures; without this check it surfaces as a useless
+                # "Unexpected response shape" instead of the real reason.
+                embedded = data.get("error") if isinstance(data, dict) else None
+                if embedded:
+                    if attempt < _MAX_ATTEMPTS - 1 and _TRANSIENT_HINT.search(
+                        json.dumps(embedded)
+                    ):
+                        time.sleep(_retry_delay(response, attempt))
+                        continue
+                    raise LLMError(
+                        f"{self.provider} returned an error: {json.dumps(embedded)[:500]}"
+                    )
                 break
             except httpx.HTTPStatusError as exc:
                 # Transient throttling/server errors are worth retrying; a
                 # genuine client error (401, 404 bad model) never will be.
-                if (
-                    exc.response.status_code in _RETRYABLE_STATUS
-                    and attempt < _MAX_ATTEMPTS - 1
-                ):
-                    time.sleep(_retry_delay(exc.response, attempt))
+                if exc.response.status_code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS - 1:
+                    body = exc.response.text or ""
+                    delay = _retry_delay(exc.response, attempt)
+                    # An explicit "try again in 9m50s" is a *schedule*, not a
+                    # dead end — honour it when it fits inside our window, even
+                    # though the same body also says "per day". Only give up
+                    # when there is no schedule at all, or when the wait the
+                    # provider wants is longer than this CLI will block for.
+                    has_schedule = _BODY_HINT.search(body) is not None or bool(
+                        exc.response.headers.get("retry-after")
+                        or exc.response.headers.get("retry-after-ms")
+                    )
+                    if _EXHAUSTED_HINT.search(body) and (
+                        not has_schedule or delay >= _MAX_HINT_WAIT
+                    ):
+                        exhausted_body = body.strip()[:400]
+                        break
+                    time.sleep(delay)
                     continue
+                raise LLMError(self._friendly_http_error(model, exc)) from exc
                 raise LLMError(self._friendly_http_error(model, exc)) from exc
             except httpx.HTTPError as exc:
                 # Connection reset / timeout: worth another attempt.
@@ -121,16 +202,32 @@ class HTTPChatLLM:
                     f"{self.provider} returned a non-JSON body: {exc}"
                 ) from exc
 
-        if data is None:  # unreachable: the last attempt breaks or raises
-            raise LLMError(f"{self.provider} returned no response")
+        if data is None:  # the loop broke out early (a limit that outlasts us)
+            raise LLMError(
+                f"{self.provider} refused the request: its limit will not clear "
+                "inside this run's retry window, so it stopped instead of "
+                f"sleeping. It said: {exhausted_body}"
+            )
 
+        return data
+
+    def _content(self, data: dict) -> str:
+        """Assistant text, with the provider named in any error message."""
+        try:
+            return self._extract_text(data)
+        except LLMError as exc:
+            raise LLMError(f"{self.provider} returned {exc}") from exc
+
+    @staticmethod
+    def _extract_text(data: dict) -> str:
+        """Pull the assistant text out of a chat.completions body."""
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"Unexpected response shape: {json.dumps(data)[:500]}") from exc
+            raise LLMError(f"unexpected response shape: {json.dumps(data)[:500]}") from exc
 
         if not content:
-            raise LLMError(f"{self.provider} returned empty content: {json.dumps(data)[:500]}")
+            raise LLMError(f"empty content: {json.dumps(data)[:500]}")
 
         if not isinstance(content, str):
             # Some providers send the multimodal shape: [{"type":"text",...}].
@@ -144,9 +241,7 @@ class HTTPChatLLM:
                 ).strip()
                 if text:
                     return text
-            raise LLMError(
-                f"{self.provider} returned non-text content: {json.dumps(data)[:500]}"
-            )
+            raise LLMError(f"non-text content: {json.dumps(data)[:500]}")
         return content
 
     @staticmethod

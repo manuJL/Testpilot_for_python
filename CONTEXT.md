@@ -227,5 +227,5 @@ demonstrate it.)
 │                        written so they must end non-green
 ├── src/testpilot/       the package (cli, config, integrity, llm, parsing,
 │                        prompts, report, sandbox/, agent/)
-└── testing/             157 tests + ScriptedLLM  (temporary, deletable)
+└── testing/             162 tests + ScriptedLLM  (temporary, deletable)
 ```

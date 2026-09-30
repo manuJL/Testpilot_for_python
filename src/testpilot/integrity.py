@@ -33,6 +33,50 @@ class SuiteStats:
         return f"tests: {self.test_count}, asserts: {self.assert_count}"
 
 
+def _docstring_nodes(tree: ast.AST) -> set[int]:
+    """Identity of every docstring literal in `tree` (matched by `id()`)."""
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        first = node.body[0] if node.body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            found.add(id(first.value))
+    return found
+
+
+def _loads_target_indirectly(tree: ast.AST) -> bool:
+    """True when the module name appears as *data*, outside of any docstring.
+
+    This is the fallback for the imports that have no AST form:
+    `importlib.import_module("testpilot_target")`, `pytest.importorskip(...)`,
+    `sys.modules["testpilot_target"]`, `name = "testpilot_target"`.
+
+    It is a fallback for a reason: matching the raw file text would let a
+    comment — "# testpilot_target is imported below" — or a module docstring
+    stand in for the dependency, and a suite that only *mentions* the code
+    under test tests nothing real. Parsing already discards comments, and
+    docstrings are filtered out here, so what can still match is a string
+    literal the code actually carries around.
+    """
+    docstrings = _docstring_nodes(tree)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value == MODULE_NAME
+            and id(node) not in docstrings
+        ):
+            return True
+    return False
+
+
 def analyse(test_code: str) -> SuiteStats:
     """Measure a test file. Unparseable input counts as an empty suite."""
     source = test_code or ""
@@ -58,9 +102,13 @@ def analyse(test_code: str) -> SuiteStats:
         elif isinstance(node, ast.Assert):
             assert_count += 1
 
-    # `importlib.import_module("testpilot_target")` (or a string the module is
-    # named in) is not an AST import, but it is still a real dependency.
-    if not imports_target and MODULE_NAME in source:
+    # `importlib.import_module("testpilot_target")`, `sys.modules["..."]` and
+    # `name = "testpilot_target"` are not AST imports, but they are real
+    # dependencies. Deliberately checked against the *tree* rather than the raw
+    # text: a comment is already gone by the time we parse, and docstrings are
+    # excluded below. Prose that merely names the module must not be mistaken
+    # for importing it — that is exactly the gap the check exists to close.
+    if not imports_target and _loads_target_indirectly(tree):
         imports_target = True
 
     return SuiteStats(imports_target=imports_target, test_count=test_count, assert_count=assert_count)

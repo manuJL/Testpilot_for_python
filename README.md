@@ -9,9 +9,12 @@ pytest tests for a Python file, runs them in a sandbox, works out whether a
 failure means the *test* is wrong or the *code* is wrong, then patches the guilty
 side — and when it genuinely can't tell, it says `unclear` instead of guessing.
 
-> Status: working end to end — **157 tests**, lint-clean, and checked against a
+> Status: working end to end — **162 tests**, lint-clean, and checked against a
 > live LLM on the files in [`examples/`](examples) (see [CONTEXT.md](CONTEXT.md)).
 > CI runs the whole suite offline, so it never needs an API key.
+>
+> **Everything here was developed and tested on Linux.** That's the only
+> platform I can vouch for — see [Known limitations](#known-limitations).
 
 ## Demo
 
@@ -162,6 +165,12 @@ Being straight about what it can't do:
 - **Free tiers are stingy.** Groq's daily token limit (200 000 TPD) is easy to
   hit when batching a folder. The run reports it plainly, quoting the provider's
   own message, when it happens.
+- **Developed and tested on Linux — nowhere else.** Every line was written,
+  run and verified on Linux, so that's the platform I actually know works. On
+  Windows or macOS it may or may not work well: the sandbox leans on
+  POSIX-only process handling (`start_new_session`, `os.killpg`) and on
+  `resource` limits, which either degrade quietly or simply aren't there. If
+  you get it running somewhere else, I'd genuinely like to hear how it went.
 
 ## Documentation
 

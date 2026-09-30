@@ -372,3 +372,31 @@ class TestNoFakeGreenRules:
         flat = self._flat(PATCH_SYSTEM)
         assert "docstring explicitly requires" in flat
         assert "fakes a pass" in flat
+
+
+class TestGraphWiring:
+    """PATCH may reach RUN only through the empty-suite guard.
+
+    Regression: `graph.add_edge(PATCH, RUN)` sat *alongside* the conditional
+    route out of the same node instead of replacing it. LangGraph executes
+    both, so when the guard said `report` a static edge fired `run` with it and
+    the graph cycled patch -> report -> run -> diagnose -> patch until it died
+    on GraphRecursionError. The patch node never empties the suite today, so
+    this stayed latent — but a static edge here is exactly what turns a guard
+    into an infinite loop.
+    """
+
+    def test_patch_has_no_static_edge_bypassing_the_guard(self):
+        from testpilot.agent.loop import PATCH, RUN, build_graph
+
+        # cli.py compiles the same graph with None deps for `testpilot graph`.
+        graph = build_graph(None, None, None)
+        assert (PATCH, RUN) not in graph.builder.edges
+
+    def test_patch_still_routes_conditionally(self):
+        # Removing the static edge must not remove the guard itself: the
+        # conditional route is what decides between RUN and REPORT.
+        from testpilot.agent.loop import PATCH, build_graph
+
+        graph = build_graph(None, None, None)
+        assert PATCH in graph.builder.branches

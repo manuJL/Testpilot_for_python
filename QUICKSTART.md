@@ -126,7 +126,7 @@ actually ended green.
 ## Run the tests
 
 ```bash
-uv run pytest testing/            # full suite (~30s, 157 tests, no API credits used)
+uv run pytest testing/            # full suite (~30s, 162 tests, no API credits used)
 uv run pytest testing/ -v         # verbose
 uv run pytest testing/test_e2e_loop.py   # just the end-to-end agent loop
 ```

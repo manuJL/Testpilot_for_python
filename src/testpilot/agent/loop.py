@@ -192,7 +192,13 @@ def build_graph(llm: LLM, sandbox: Sandbox, config: Config):
         _route_after_diagnose,
         {PATCH: PATCH, REPORT: REPORT},
     )
-    graph.add_edge(PATCH, RUN)  # patch -> re-run proves the fix
+    # PATCH routes through the SAME guard as GENERATE above, so it must be
+    # `add_conditional_edges` and never `add_edge(PATCH, RUN)`. LangGraph adds a
+    # static edge *alongside* a branch rather than instead of it, so the plain
+    # edge keeps forcing RUN even once the guard has decided there is nothing to
+    # run — the graph then cycles patch -> report -> run -> diagnose -> patch
+    # until it dies on the recursion limit. Locking the shape down in
+    # testing/test_regressions.py stops it coming back.
     graph.add_edge(REPORT, END)
 
     return graph.compile()

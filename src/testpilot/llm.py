@@ -190,7 +190,6 @@ class HTTPChatLLM:
                     time.sleep(delay)
                     continue
                 raise LLMError(self._friendly_http_error(model, exc)) from exc
-                raise LLMError(self._friendly_http_error(model, exc)) from exc
             except httpx.HTTPError as exc:
                 # Connection reset / timeout: worth another attempt.
                 if attempt < _MAX_ATTEMPTS - 1:

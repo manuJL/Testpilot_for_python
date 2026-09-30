@@ -60,6 +60,37 @@ class TestAnalyse:
         code = 'm = __import__("testpilot_target")\n\ndef test_x():\n    assert True\n'
         assert analyse(code).imports_target is True
 
+    def test_a_comment_naming_the_module_is_not_an_import(self):
+        # Regression: the fallback matched the raw file text, so a comment
+        # could stand in for the dependency and a suite that imports nothing
+        # would be waved through as usable.
+        code = (
+            "# testpilot_target is imported below\n"
+            "import pytest\n"
+            "\ndef test_x():\n    assert True\n"
+        )
+        assert analyse(code).imports_target is False
+
+    def test_a_docstring_naming_the_module_is_not_an_import(self):
+        code = (
+            '"""Tests for testpilot_target."""\n'
+            "import pytest\n"
+            "\ndef test_x():\n    assert True\n"
+        )
+        assert analyse(code).imports_target is False
+
+    def test_indirect_loads_of_the_module_still_count(self):
+        # Tighter than raw text, but never tighter than reality: these all
+        # genuinely reach for the module under test and must keep counting.
+        for head in (
+            'import importlib\nm = importlib.import_module("testpilot_target")\n',
+            'name = "testpilot_target"\nimport importlib\nm = importlib.import_module(name)\n',
+            'import sys\nm = sys.modules["testpilot_target"]\n',
+            'm = __import__("testpilot_target")\n',
+        ):
+            code = head + "\ndef test_x():\n    assert True\n"
+            assert analyse(code).imports_target is True, head
+
 
 class TestUsability:
     def test_a_real_suite_has_no_objection(self):
